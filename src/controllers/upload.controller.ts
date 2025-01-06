@@ -1,50 +1,39 @@
-import {
-  Controller,
-  Post,
-  UseInterceptors,
-  UploadedFile,
-  BadRequestException,
-  MaxFileSizeValidator,
-  ParseFilePipe,
-} from '@nestjs/common';
+import { Controller, Post, Body, UseInterceptors, UploadedFile, Param } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UploadService } from '../services/upload.service';
-import { ApiTags, ApiConsumes, ApiBody } from '@nestjs/swagger';
 
-@ApiTags('uploads')
-@Controller('uploads')
+@Controller('upload')
 export class UploadController {
   constructor(private readonly uploadService: UploadService) {}
 
-  @Post()
-  @ApiConsumes('multipart/form-data')
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        file: {
-          type: 'string',
-          format: 'binary',
-        },
-      },
-    },
-  })
-  @UseInterceptors(FileInterceptor('file'))
-  async uploadFile(
-    @UploadedFile(
-      new ParseFilePipe({
-        validators: [
-          new MaxFileSizeValidator({ maxSize: 1024 * 1024 * 1024 }), // 1GB
-        ],
-      }),
-    )
-    file: Express.Multer.File,
+  @Post('initiate')
+  async initiateUpload(
+    @Body() body: { filename: string; mimetype: string },
   ) {
-    if (!file) {
-      throw new BadRequestException('No file uploaded');
-    }
+    const { filename, mimetype } = body;
+    const uploadId = await this.uploadService.initiateUpload(filename, mimetype);
+    return { uploadId };
+  }
 
-    const location = await this.uploadService.processUpload(file);
+  @Post('part/:uploadId/:partNumber')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadPart(
+    @Param('uploadId') uploadId: string,
+    @Param('partNumber') partNumber: number,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('filename') filename: string,
+  ) {
+    const part = await this.uploadService.uploadPart(file, uploadId, filename, partNumber);
+    return { part };
+  }
+
+  @Post('complete/:uploadId')
+  async completeUpload(
+    @Param('uploadId') uploadId: string,
+    @Body() body: { filename: string; parts: Array<{ ETag: string; PartNumber: number }> },
+  ) {
+    const { filename, parts } = body;
+    const location = await this.uploadService.completeUpload(uploadId, filename, parts);
     return { location };
   }
 } 

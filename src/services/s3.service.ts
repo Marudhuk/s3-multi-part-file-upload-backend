@@ -2,16 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { S3Client, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { ConfigService } from '@nestjs/config';
 import { createReadStream } from 'fs';
-import * as fs from 'fs/promises';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { S3 } from 'aws-sdk';
 
 @Injectable()
 export class S3Service {
   private readonly s3Client: S3Client;
   private readonly logger = new Logger(S3Service.name);
   private readonly CHUNK_SIZE = 5 * 1024 * 1024; // 5MB minimum chunk size for S3
+  private s3: S3;
 
   constructor(private configService: ConfigService) {
     this.s3Client = new S3Client({
@@ -21,11 +23,12 @@ export class S3Service {
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
       },
     });
+    this.s3 = new S3();
   }
 
   async initiateMultipartUpload(filename: string, contentType: string): Promise<string> {
     const command = new CreateMultipartUploadCommand({
-      Bucket: process.env.S3_BUCKET,
+      Bucket: process.env.AWS_BUCKET_NAME,
       Key: filename,
       ContentType: contentType,
     });
@@ -39,27 +42,33 @@ export class S3Service {
     }
   }
 
-  async uploadPart(uploadId: string, partNumber: number, filename: string, chunk: Buffer): Promise<string> {
-    const command = new UploadPartCommand({
-      Bucket: process.env.S3_BUCKET,
-      Key: filename,
+  async uploadPart(
+    uploadId: string,
+    key: string,
+    filePath: string,
+    partNumber: number,
+  ): Promise<{ ETag: string; PartNumber: number }> {
+    const fileStream = fs.createReadStream(filePath);
+    
+    const uploadParams = {
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: key,
       UploadId: uploadId,
       PartNumber: partNumber,
-      Body: chunk,
-    });
+      Body: fileStream,
+    };
 
-    try {
-      const response = await this.s3Client.send(command);
-      return response.ETag;
-    } catch (error) {
-      this.logger.error(`Failed to upload part ${partNumber}: ${error.message}`);
-      throw error;
-    }
+    const result = await this.s3.uploadPart(uploadParams).promise();
+    
+    return {
+      ETag: result.ETag,
+      PartNumber: partNumber,
+    };
   }
 
   async completeMultipartUpload(uploadId: string, filename: string, parts: { ETag: string; PartNumber: number }[]): Promise<string> {
     const command = new CompleteMultipartUploadCommand({
-      Bucket: process.env.S3_BUCKET,
+      Bucket: process.env.AWS_BUCKET_NAME,
       Key: filename,
       UploadId: uploadId,
       MultipartUpload: { Parts: parts },
@@ -70,7 +79,7 @@ export class S3Service {
       
       // Generate presigned URL
       const getObjectCommand = new GetObjectCommand({
-        Bucket: process.env.S3_BUCKET,
+        Bucket: process.env.AWS_BUCKET_NAME,
         Key: filename,
       });
       
@@ -86,7 +95,7 @@ export class S3Service {
 
   async abortMultipartUpload(uploadId: string, filename: string): Promise<void> {
     const command = new AbortMultipartUploadCommand({
-      Bucket: process.env.S3_BUCKET,
+      Bucket: process.env.AWS_BUCKET_NAME,
       Key: filename,
       UploadId: uploadId,
     });

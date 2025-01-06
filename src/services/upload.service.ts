@@ -13,25 +13,42 @@ export class UploadService {
 
   constructor(private readonly s3Service: S3Service) {}
 
-  async processUpload(file: Express.Multer.File): Promise<string> {
-    const tempFilePath = await this.saveTempFile(file);
-    const uploadId = await this.s3Service.initiateMultipartUpload(
-      file.originalname,
-      file.mimetype,
-    );
+  async initiateUpload(filename: string, mimetype: string): Promise<string> {
+    return await this.s3Service.initiateMultipartUpload(filename, mimetype);
+  }
 
+  async uploadPart(
+    file: Express.Multer.File,
+    uploadId: string,
+    filename: string,
+    partNumber: number,
+  ): Promise<{ ETag: string; PartNumber: number }> {
+    const tempFilePath = await this.saveTempFile(file);
+    
     try {
-      const parts = await this.uploadParts(tempFilePath, uploadId, file.originalname);
-      const location = await this.s3Service.completeMultipartUpload(
+      const part = await this.s3Service.uploadPart(
         uploadId,
-        file.originalname,
-        parts,
+        filename,
+        tempFilePath,
+        partNumber,
       );
       await this.cleanupTempFile(tempFilePath);
-      return location;
+      return part;
     } catch (error) {
-      await this.s3Service.abortMultipartUpload(uploadId, file.originalname);
       await this.cleanupTempFile(tempFilePath);
+      throw error;
+    }
+  }
+
+  async completeUpload(
+    uploadId: string,
+    filename: string,
+    parts: Array<{ ETag: string; PartNumber: number }>,
+  ): Promise<string> {
+    try {
+      return await this.s3Service.completeMultipartUpload(uploadId, filename, parts);
+    } catch (error) {
+      await this.s3Service.abortMultipartUpload(uploadId, filename);
       throw error;
     }
   }
@@ -41,59 +58,6 @@ export class UploadService {
     const tempFilePath = path.join(tempDir, `${uuidv4()}-${file.originalname}`);
     await fs.writeFile(tempFilePath, file.buffer);
     return tempFilePath;
-  }
-
-  private async uploadParts(
-    filePath: string,
-    uploadId: string,
-    filename: string,
-  ): Promise<{ ETag: string; PartNumber: number }[]> {
-    const fileHandle = await fs.open(filePath, 'r');
-    const fileSize = (await fileHandle.stat()).size;
-    const parts: { ETag: string; PartNumber: number }[] = [];
-    let partNumber = 1;
-
-    for (let position = 0; position < fileSize; position += this.CHUNK_SIZE) {
-      const chunk = Buffer.alloc(Math.min(this.CHUNK_SIZE, fileSize - position));
-      await fileHandle.read(chunk, 0, chunk.length, position);
-
-      const etag = await this.uploadPartWithRetry(
-        uploadId,
-        partNumber,
-        filename,
-        chunk,
-      );
-
-      parts.push({ ETag: etag, PartNumber: partNumber });
-      partNumber++;
-    }
-
-    await fileHandle.close();
-    return parts;
-  }
-
-  private async uploadPartWithRetry(
-    uploadId: string,
-    partNumber: number,
-    filename: string,
-    chunk: Buffer,
-    retryCount = 0,
-  ): Promise<string> {
-    try {
-      return await this.s3Service.uploadPart(uploadId, partNumber, filename, chunk);
-    } catch (error) {
-      if (retryCount < this.MAX_RETRIES) {
-        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retryCount)));
-        return this.uploadPartWithRetry(
-          uploadId,
-          partNumber,
-          filename,
-          chunk,
-          retryCount + 1,
-        );
-      }
-      throw error;
-    }
   }
 
   private async cleanupTempFile(filePath: string): Promise<void> {
